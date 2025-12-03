@@ -253,60 +253,64 @@ class SimReaderApp:
             self.send_apdu(c, [0xA0, 0xA4, 0x00, 0x00, 0x02, 0x3F, 0x00]) # MF
             self.send_apdu(c, [0xA0, 0xA4, 0x00, 0x00, 0x02, 0x7F, 0x10]) # TELECOM
             
-            # Pobieramy nagłówek pliku SMS
+            # Pobierz nagłówek pliku SMS
             head, sw1, sw2 = self.send_apdu(c, [0xA0, 0xA4, 0x00, 0x00, 0x02, 0x6F, 0x3C])
             
-            # Standardowa długość SMS to 176 bajtów
-            rec_len = 176
+            rec_len = 176 # Standardowa długość SMS
             
-            # MATEMATYKA: Obliczamy ilość rekordów
-            # Bajty 2 i 3 nagłówka to rozmiar pliku
-            total_records = 20 # Domyślnie bezpieczne 20
+            # --- DYNAMIKA: Obliczamy ile jest miejsc na SMSy ---
+            # Jeśli się nie uda obliczyć, przyjmujemy bezpieczne 50
+            total_slots = 50 
             if len(head) >= 4:
                 file_size = (head[2] << 8) + head[3]
-                total_records = file_size // rec_len
-                self.log(f">>> Rozmiar pliku: {file_size} bajtów. Slotów SMS: {total_records}")
-            else:
-                self.log(f">>> Nie udało się obliczyć rozmiaru. Skanuję domyślnie 20 slotów.")
-
+                total_slots = file_size // rec_len
+                self.log(f">>> Rozmiar pliku SMS: {file_size} bajtów (Miejsc: {total_slots})")
+            
+            self.log(f">>> Skanowanie {total_slots} slotów... (Puste będą pomijane)")
             self.log("-" * 80)
 
-            # Pętla wykonuje się dokładnie tyle razy, ile jest slotów
-            for i in range(1, total_records + 1):
+            found_count = 0
+
+            for i in range(1, total_slots + 1):
+                # Odczyt rekordu
                 data, sw1, sw2 = self.send_apdu(c, [0xA0, 0xB2, i, 0x04, rec_len])
                 
+                # Żeby interfejs się nie zawiesił przy dużej liczbie pustych slotów:
+                if i % 5 == 0: self.root.update()
+
                 if sw1 == 0x90:
                     status = data[0]
-                    # 0x00 = Pusty, 0x01/03 = Zajęty
                     
+                    # --- FILTRACJA ---
                     if status == 0x00:
-                        # Teraz wypisujemy puste, żebyś widział postęp
-                        self.log(f"[{i:02d}] <Pusty slot>")
-                        # Opcjonalnie: odświeżamy okno co każdy rekord, żeby nie "wisiało"
-                        self.root.update()
-                        
+                        # To jest PUSTY slot. 
+                        # 'continue' sprawia, że przeskakujemy do następnego numeru pętli
+                        # bez wypisywania niczego na ekran.
+                        continue
+                    
                     elif status in [0x01, 0x03, 0x05, 0x07]:
+                        found_count += 1
                         stat_txt = "NOWY" if status == 0x03 else "Stary"
                         
                         # Dekodowanie
                         try:
+                            # Przekazujemy dane bez bajtu statusu ([1:])
                             sender, date, msg = PDUDecoder.parse_sms(data[1:])
+                            
                             self.log(f"[{i:02d}] {stat_txt} | Od: {sender} | {date}")
                             self.log(f"     Treść: {msg}")
                             self.log("-" * 40)
                         except:
-                            self.log(f"[{i:02d}] Błąd dekodowania PDU")
-                            
-                    else:
-                        self.log(f"[{i:02d}] Status nieznany (FF lub inny): {status:02X}")
+                            self.log(f"[{i:02d}] Błąd dekodowania wiadomości")
                 
+                # Obsługa końca pliku (gdyby obliczenia rozmiaru były błędne)
                 elif sw1 == 0x62 or sw1 == 0x6B or sw1 == 0x6A:
-                    self.log("Koniec pliku (karta zgłosiła koniec).")
                     break
-                else:
-                    self.log(f"[{i:02d}] Błąd odczytu: {sw1:02X} {sw2:02X}")
-
-            self.log(f"Zakończono skanowanie {total_records} slotów.")
+            
+            if found_count == 0:
+                self.log("Nie znaleziono żadnych wiadomości SMS na tej karcie.")
+            else:
+                self.log(f"Zakończono. Znaleziono {found_count} wiadomości.")
 
         except Exception as e:
             self.log(f"Błąd: {e}")
